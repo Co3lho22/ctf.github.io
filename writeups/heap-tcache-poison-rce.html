@@ -110,48 +110,94 @@ Stripped:   No</code></pre>
           Full RELRO rules out a GOT overwrite. Stack canary rules out a direct stack smash.
           NX rules out shellcode. PIE randomizes all binary addresses at load time. SHSTK and IBT
           are Intel CET shadow-stack mitigations — relevant to note, but they don't interfere with
-          an attack that targets the stack via the heap. Not stripped means symbols are intact,
+          a heap-based attack that targets the stack. Not stripped means symbols are intact,
           which helps when computing libc offsets.
         </p>
 
-        <h3>Reverse Engineering</h3>
-        <p>
-          The binary is a single <code>main</code> — no helper functions, everything inlined.
-          The decompiler reveals two stack-allocated arrays of 16 slots each:
-        </p>
-        <pre><code class="language-c">void  *local_198[16];   // chunk pointers
-ulong  local_118[16];   // stored sizes</code></pre>
-        <p>
-          The <code>malloc</code> handler allocates a chunk and populates both arrays.
-          The stored size is not the requested size — it is <code>size + 0x10</code>:
-        </p>
-        <pre><code class="language-c">pvVar4 = malloc((ulong)uVar3);
-local_198[uVar2] = pvVar4;
-local_118[uVar2] = (ulong)(uVar3 + 0x10);   // stored size is always size + 0x10</code></pre>
-        <p>
-          <code>safe_read</code> and <code>safe_write</code> both use the stored size, not the
-          allocation size:
-        </p>
-        <pre><code class="language-c">// safe_read — reads size+0x10 bytes into a size-byte chunk
-read(0, local_198[uVar2], local_118[uVar2]);
+        <h2>Reverse Engineering</h2>
 
-// safe_write — outputs size+0x10 bytes from a size-byte chunk
-fwrite(local_198[uVar2], 1, local_118[uVar2], local_1a8);
-fwrite(&DAT_001020c3, 1, 1, local_1a8);   // single trailing byte (differs between variants)
-fflush(local_1a8);</code></pre>
+        <h3>Understanding the Binary</h3>
         <p>
-          This is the complete primitive: every read and write overflows or over-reads the chunk
-          boundary by exactly 0x10 bytes. On a 24-byte chunk, those 0x10 extra bytes reach into
-          the next contiguous chunk's <code>prev_size</code>, <code>chunk_size</code>, and
-          <code>fd</code> pointer. Controlling <code>fd</code> on a freed tcache chunk is tcache poison.
+          The binary is a custom heap allocator harness — a controlled sandbox where you interact
+          with glibc's allocator through a text-based command interface over stdin.
+          There are no helper functions; everything lives inside a single <code>main</code>.
         </p>
         <p>
-          The last thing to confirm from the decompiler: there is no win function and no code
-          path that reads a flag file. The only exit is <code>quit</code>, which falls through
-          to <code>return 0</code>. The objective is a shell — which means the return address
-          of <code>main</code> is the target.
+          Two arrays are allocated on the stack at startup and zero-initialised:
         </p>
-        <p class="screenshot-todo">Ghidra decompiler — highlight the <code>size + 0x10</code> line in the malloc handler and the <code>read()</code>/<code>fwrite()</code> calls using the stored size</p>
+        <pre><code class="language-c">void  *chunks[16];       // pointers to allocated heap regions
+ulong  chunk_sizes[16];  // stored sizes — not what you'd expect</code></pre>
+        <p>
+          Every operation takes an index into these arrays. The index is bounds-checked against
+          15 with <code>__assert_fail</code>, so the slot space is fixed at 16 entries.
+          There is no win function and no code path that reads a flag — the only exit is
+          <code>quit</code>, which returns from <code>main</code>. The objective is a shell.
+        </p>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/ghidra-overview.png — Ghidra decompiler showing the top of main(): the two array declarations (chunks, chunk_sizes) and the start of the dispatch loop</p>
+
+        <h3>Command Handlers</h3>
+        <p>
+          The main loop reads a command string via <code>scanf</code> and dispatches through
+          a chain of <code>strcmp</code> comparisons. Five commands are supported:
+        </p>
+
+        <p><strong>malloc &lt;idx&gt; &lt;size&gt;</strong> — calls <code>malloc(size)</code>,
+          stores the pointer in <code>chunks[idx]</code>, and stores the size in
+          <code>chunk_sizes[idx]</code>. Straightforward.</p>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/ghidra-malloc.png — Ghidra decompiler showing the malloc handler: malloc() call, chunks[idx] assignment, chunk_sizes[idx] assignment</p>
+
+        <p><strong>free &lt;idx&gt;</strong> — calls <code>free(chunks[idx])</code> and
+          zeroes the pointer slot. No UAF here — the pointer is cleared after free.</p>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/ghidra-free.png — Ghidra decompiler showing the free handler</p>
+
+        <p><strong>safe_read &lt;idx&gt;</strong> — reads from stdin directly into
+          <code>chunks[idx]</code> using <code>read(0, chunks[idx], chunk_sizes[idx])</code>.
+          The size used is whatever is stored in <code>chunk_sizes[idx]</code>.</p>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/ghidra-safe-read.png — Ghidra decompiler showing the safe_read handler with the read() call and chunk_sizes[idx] as the length</p>
+
+        <p><strong>safe_write &lt;idx&gt;</strong> — writes <code>chunk_sizes[idx]</code> bytes
+          from <code>chunks[idx]</code> to stdout via <code>fwrite</code>, then writes one
+          trailing byte, then flushes. The trailing byte is what differs between the easy and
+          hard variants.</p>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/ghidra-safe-write.png — Ghidra decompiler showing the safe_write handler: both fwrite() calls and the trailing byte comment</p>
+
+        <p><strong>quit</strong> — exits the loop and returns from <code>main</code>.
+          This is the trigger for any payload written to the return address.</p>
+
+        <h3>Spotting the Primitive</h3>
+        <p>
+          Going back to the <code>malloc</code> handler — this line stands out:
+        </p>
+        <pre><code class="language-c">chunk_sizes[idx] = (ulong)(size + 0x10);</code></pre>
+        <p>
+          The stored size is <strong>not</strong> the allocation size. It is the allocation size
+          plus 16 bytes. That extra 0x10 is exactly the size of a glibc chunk header
+          (<code>prev_size</code> + <code>chunk_size</code> fields). Since
+          <code>safe_read</code> and <code>safe_write</code> use <code>chunk_sizes[idx]</code>
+          as their byte count, every read and every write silently crosses the chunk boundary
+          by 0x10 bytes into the next contiguous chunk's metadata.
+        </p>
+        <p>
+          On a 24-byte allocation, those 0x10 bytes reach the next chunk's
+          <code>prev_size</code>, <code>chunk_size</code>, and — critically — its
+          <code>fd</code> pointer. Controlling <code>fd</code> on a freed tcache chunk is the
+          tcache poison primitive.
+        </p>
+        <img src="../assets/img/writeups/heap-tcache-poison-rce/ghidra_size+0x10_malloc.png" alt="Ghidra decompiler — malloc handler showing chunk_sizes[idx] = size + 0x10" style="width:100%;border-radius:6px;border:1px solid var(--border);margin:0.75rem 0;">
+
+        <h3>Confirming with pwndbg</h3>
+        <p>
+          Before building the exploit, I confirmed the primitive dynamically. Allocating two
+          adjacent 24-byte chunks, then calling <code>safe_write</code> on chunk 0, the output
+          is 40 bytes — 24 bytes of chunk 0 data followed by 16 bytes that belong to chunk 1's
+          header. The over-read crosses the boundary exactly as expected.
+        </p>
+        <p>
+          Conversely, writing 40 bytes via <code>safe_read</code> into chunk 0 lets me overwrite
+          chunk 1's <code>prev_size</code>, <code>chunk_size</code>, and <code>fd</code> —
+          memory I have no business touching based on the allocation.
+        </p>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/pwndbg-overflow-proof.png — pwndbg showing two adjacent chunks in memory (x/8gx or vis), then after safe_read on chunk 0 the output visibly overwrites chunk 1's header fields</p>
 
         <h2>Exploit Plan</h2>
         <p>
@@ -282,26 +328,26 @@ ret_address = stack_address - 0x120</code></pre>
 
         <p><strong>Heap layout before the overflow</strong> — <code>vis</code> shows chunk 0 and chunk 1
           side by side, both intact, chunk 1's <code>fd</code> pointing normally into the tcache bin:</p>
-        <p class="screenshot-todo">pwndbg <code>vis</code> — chunk 0 and chunk 1 intact, chunk 1 fd pointing normally into the tcache bin (before overflow)</p>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/vis-before-overflow.png — pwndbg vis, chunk 0 and chunk 1 intact, chunk 1 fd pointing normally into tcache bin</p>
 
         <p><strong>After writing the payload via <code>safe_read 0</code></strong> — <code>vis</code> again.
           Chunk 0's data is filled, and chunk 1's <code>fd</code> now holds the mangled pointer to
           <code>libc.environ</code>. This is the write we should not be able to do based on the
           allocation size alone:</p>
-        <p class="screenshot-todo">pwndbg <code>vis</code> — chunk 1 fd overwritten with the mangled <code>libc.environ</code> pointer (after overflow)</p>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/vis-after-overflow.png — pwndbg vis, chunk 1 fd overwritten with mangled libc.environ pointer</p>
 
         <p><strong>Tcache bin before and after</strong> — <code>tcache</code> shows where the next
           allocation of this size class will land. Before the overflow it points to a valid heap
           address; after it points into libc:</p>
-        <p class="screenshot-todo">pwndbg <code>tcache</code> — before overflow, fd is a normal heap address</p>
-        <p class="screenshot-todo">pwndbg <code>tcache</code> — after overflow, fd points to <code>libc.environ</code> (demangled)</p>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/tcache-before-overflow.png — pwndbg tcache, fd is a normal heap address</p>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/tcache-after-overflow.png — pwndbg tcache, fd now points to libc.environ (demangled)</p>
 
         <p><strong>Confirming <code>libc.environ</code> holds a stack address</strong> — first,
           <code>vmmap</code> shows the stack region so we know what a stack address looks like.
           Then <code>telescope &lt;libc.environ address&gt;</code> reads from that address and
           shows a pointer into the stack region — the value we're about to leak:</p>
-        <p class="screenshot-todo">pwndbg <code>vmmap</code> — highlight the stack segment so the stack address range is visible</p>
-        <p class="screenshot-todo">pwndbg <code>telescope 0x&lt;libc_base + environ_offset&gt;</code> — shows the stack pointer stored at <code>libc.environ</code></p>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/vmmap-stack.png — pwndbg vmmap with the stack segment highlighted</p>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/telescope-environ.png — pwndbg telescope at libc.environ address showing the stack pointer value</p>
         <p>
           The address of <code>libc.environ</code> is simply <code>libc_base + offset</code>,
           where the offset is resolved after the libc leak:
