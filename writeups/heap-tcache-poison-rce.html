@@ -151,7 +151,7 @@ ulong  chunk_sizes[16];  // stored sizes — not what you'd expect</code></pre>
           There is no win function and no code path that reads a flag — the only exit is
           <code>quit</code>, which returns from <code>main</code>. The objective is a shell.
         </p>
-        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/ghidra-overview.png — Ghidra decompiler showing the top of main(): the two array declarations (chunks, chunk_sizes) and the start of the dispatch loop</p>
+        <img src="../assets/img/writeups/heap-tcache-poison-rce/main_overview.png" alt="Ghidra decompiler — main() overview showing chunks and chunk_sizes arrays" style="width:100%;border-radius:6px;border:1px solid var(--border);margin:0.75rem 0;">
 
         <h3>Command Handlers</h3>
         <p>
@@ -201,7 +201,7 @@ ulong  chunk_sizes[16];  // stored sizes — not what you'd expect</code></pre>
           <code>fd</code> pointer. Controlling <code>fd</code> on a freed tcache chunk is the
           tcache poison primitive.
         </p>
-        <img src="../assets/img/writeups/heap-tcache-poison-rce/ghidra_size+0x10_malloc.png" alt="Ghidra decompiler — malloc handler showing chunk_sizes[idx] = size + 0x10" style="width:100%;border-radius:6px;border:1px solid var(--border);margin:0.75rem 0;">
+        <img src="../assets/img/writeups/heap-tcache-poison-rce/oneliner_of_0x10.png" alt="Ghidra decompiler — malloc handler showing chunk_sizes[idx] = size + 0x10" style="width:100%;border-radius:6px;border:1px solid var(--border);margin:0.75rem 0;">
 
         <h3>Confirming with pwndbg</h3>
         <p>
@@ -628,6 +628,7 @@ io.interactive()</code></pre>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <script>hljs.highlightAll();</script>
   <script src="../assets/js/toc.js"></script>
+  <script src="../assets/js/lightbox.js"></script>
   <script src="../assets/js/theme.js"></script>
   <script src="../assets/js/main.js"></script>
 </body>

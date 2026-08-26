@@ -518,6 +518,66 @@ footer {
   }
 }
 
+/* ===== Figures & image captions ===== */
+.entry-content figure { margin: 0.75rem 0; }
+
+.entry-content figure img {
+  width: 100%;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  display: block;
+  cursor: zoom-in;
+  transition: opacity 0.15s;
+}
+
+.entry-content figure img:hover { opacity: 0.82; }
+
+.entry-content figcaption {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-top: 0.35rem;
+  text-align: center;
+}
+
+/* ===== Lightbox ===== */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.82);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+  padding: 2rem;
+  cursor: zoom-out;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.lightbox.active { opacity: 1; }
+
+.lightbox-img {
+  max-width: min(90vw, 1200px);
+  max-height: 80vh;
+  object-fit: contain;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  cursor: zoom-out;
+}
+
+.lightbox-caption {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-top: 1rem;
+  text-align: center;
+  max-width: 600px;
+}
+
 /* ===== Screenshot placeholder ===== */
 .screenshot-todo {
   border: 1px dashed var(--accent);
