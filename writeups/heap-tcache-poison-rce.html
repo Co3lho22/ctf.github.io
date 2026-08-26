@@ -84,22 +84,16 @@
 scp hacker@dojo.pwn.college:/challenge/&lt;binary&gt; .
 scp hacker@dojo.pwn.college:/challenge/lib/libc.so.6 .
 scp hacker@dojo.pwn.college:/challenge/lib/ld-linux-x86-64.so.2 .</code></pre>
-        <p>
-          Three patchelf steps, each doing something distinct:
-        </p>
-        <pre><code class="language-bash"># 1. Set the interpreter (dynamic linker) to the local copy.
-#    $ORIGIN tells the linker to look for libraries in the same directory as the binary.
+        <pre><code class="language-bash"># set interpreter + rpath ($ORIGIN = same dir as binary)
 patchelf --set-interpreter ./ld-linux-x86-64.so.2 --set-rpath '$ORIGIN' &lt;binary&gt;
 
-# 2. Inspect what library paths the binary currently requests.
-#    This reveals the hardcoded server path, e.g. /challenge/lib/libc.so.6
+# check hardcoded library path
 patchelf --print-needed &lt;binary&gt;
 
-# 3. Replace the hardcoded server path with just the filename.
-#    Combined with the $ORIGIN rpath, the linker will now find libc.so.6 locally.
+# replace it with just the filename (resolved via $ORIGIN)
 patchelf --replace-needed /challenge/lib/libc.so.6 libc.so.6 &lt;binary&gt;
 
-# Verify the needed entry is now clean
+# verify
 patchelf --print-needed &lt;binary&gt;</code></pre>
         <p>
           After this, running the binary locally loads the server's exact libc.
