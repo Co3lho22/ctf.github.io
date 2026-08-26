@@ -78,23 +78,39 @@
           if it appears to work locally.
         </p>
         <p>
-          The fix is to pull the server's libc and loader and patch the binary to use them:
+          The fix is to pull the binary, libc, and loader locally, then patch the binary
+          to use them instead of the server paths.
         </p>
-        <pre><code class="language-bash"># Pull the binary, libc, and loader from the remote dojo
+        <pre><code class="language-bash"># Pull the binary, libc, and loader
 scp hacker@dojo.pwn.college:/challenge/&lt;binary&gt; .
 scp hacker@dojo.pwn.college:/lib/x86_64-linux-gnu/libc.so.6 .
-scp hacker@dojo.pwn.college:/lib64/ld-linux-x86-64.so.2 .
-
-# Patch the binary's interpreter and rpath to use the local copies
-patchelf --set-interpreter ./ld-linux-x86-64.so.2 &lt;binary&gt;
-patchelf --set-rpath . &lt;binary&gt;</code></pre>
+scp hacker@dojo.pwn.college:/lib64/ld-linux-x86-64.so.2 .</code></pre>
         <p>
-          After patching, the binary runs locally against the exact libc from the server.
-          Any offset derived in GDB is valid on the remote — no surprises at submission time.
+          Three patchelf steps, each doing something distinct:
+        </p>
+        <pre><code class="language-bash"># 1. Set the interpreter (dynamic linker) to the local copy.
+#    $ORIGIN tells the linker to look for libraries in the same directory as the binary.
+patchelf --set-interpreter ./ld-linux-x86-64.so.2 --set-rpath '$ORIGIN' &lt;binary&gt;
+
+# 2. Inspect what library paths the binary currently requests.
+#    This reveals the hardcoded server path, e.g. /challenge/lib/libc.so.6
+patchelf --print-needed &lt;binary&gt;
+
+# 3. Replace the hardcoded server path with just the filename.
+#    Combined with the $ORIGIN rpath, the linker will now find libc.so.6 locally.
+patchelf --replace-needed /challenge/lib/libc.so.6 libc.so.6 &lt;binary&gt;
+
+# Verify the needed entry is now clean
+patchelf --print-needed &lt;binary&gt;</code></pre>
+        <p>
+          After this, running the binary locally loads the server's exact libc.
+          Every offset derived in GDB — arena distance to libc base, <code>libc.environ</code>,
+          gadget addresses — is valid on the remote.
           Confirm the version before doing anything else:
         </p>
         <pre><code class="language-bash">strings libc.so.6 | grep "GNU"</code></pre>
-        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/libc-version.png — terminal output of strings libc.so.6 | grep "GNU" showing glibc 2.35</p>
+        <pre><code class="language-plaintext">GNU C Library (Ubuntu GLIBC 2.35-0ubuntu3.4) stable release version 2.35.
+Compiled by GNU CC version 11.4.0.</code></pre>
 
         <h2>Recon</h2>
 
