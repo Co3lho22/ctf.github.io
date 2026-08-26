@@ -450,6 +450,72 @@ footer {
 
 .social a:hover { color: var(--accent); text-decoration: none; }
 
+/* ===== Table of Contents ===== */
+.toc-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 2rem;
+}
+
+.toc-title {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-bottom: 0.65rem;
+}
+
+.toc-title::before {
+  content: '// ';
+  color: var(--accent);
+  opacity: 0.6;
+}
+
+.toc-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.toc-list a {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  text-decoration: none;
+  transition: color 0.15s;
+}
+
+.toc-list a:hover,
+.toc-list a.active { color: var(--accent); text-decoration: none; }
+
+.toc-h3 { padding-left: 1rem; }
+.toc-h3 a { font-size: 0.78rem; }
+
+/* ===== Screenshot placeholder ===== */
+.screenshot-todo {
+  border: 1px dashed var(--accent);
+  border-radius: 6px;
+  padding: 0.6rem 1rem;
+  margin: 0.75rem 0;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--accent);
+  opacity: 0.7;
+}
+
+.screenshot-todo::before {
+  content: '[ 📷 screenshot ] ';
+  font-weight: 600;
+}
+
 /* ===== Scroll fade-in ===== */
 .fade-in {
   opacity: 0;

@@ -50,6 +50,8 @@
         </div>
       </header>
 
+      <div id="toc"></div>
+
       <div class="entry-content">
 
         <h2>Overview</h2>
@@ -68,25 +70,34 @@
 
         <h2>Environment Setup</h2>
         <p>
-          The binary is dynamically linked against a specific libc and loader provided by the
-          challenge, with hardcoded library paths. To debug locally with GDB, I need to mirror
-          that layout exactly.
+          The binary is dynamically linked against the server's libc — a different version than
+          whatever is installed locally. This matters because every hardcoded offset in the exploit
+          (arena pointer distance to libc base, <code>libc.environ</code> offset, gadget addresses)
+          is specific to that exact libc build. Running against the wrong one means the offsets are
+          wrong, the leaks are misinterpreted, and the exploit fails silently on the remote even
+          if it appears to work locally.
+        </p>
+        <p>
+          The fix is to pull the server's libc and loader and patch the binary to use them:
         </p>
         <pre><code class="language-bash"># Pull the binary, libc, and loader from the remote dojo
-scp hacker@dojo.pwn.college:/challenge/tcache-terror-easy .
-scp hacker@dojo.pwn.college:/challenge/lib/libc.so.6 .
-scp hacker@dojo.pwn.college:/challenge/lib/ld-linux-x86-64.so.2 .
+scp hacker@dojo.pwn.college:/challenge/&lt;binary&gt; .
+scp hacker@dojo.pwn.college:/lib/x86_64-linux-gnu/libc.so.6 .
+scp hacker@dojo.pwn.college:/lib64/ld-linux-x86-64.so.2 .
 
-# Mirror the hardcoded paths locally with symlinks
-sudo mkdir -p /challenge/lib
-sudo ln -s $(pwd)/libc.so.6 /challenge/lib/libc.so.6
-sudo ln -s $(pwd)/ld-linux-x86-64.so.2 /challenge/lib/ld-linux-x86-64.so.2</code></pre>
+# Patch the binary's interpreter and rpath to use the local copies
+patchelf --set-interpreter ./ld-linux-x86-64.so.2 &lt;binary&gt;
+patchelf --set-rpath . &lt;binary&gt;</code></pre>
+        <p>
+          After patching, the binary runs locally against the exact libc from the server.
+          Any offset derived in GDB is valid on the remote — no surprises at submission time.
+        </p>
 
         <h2>Recon</h2>
 
         <h3>Checksec</h3>
         <pre><code class="language-plaintext">pwndbg> checksec
-File:     /home/storage/co3lho22/pwn.college/tcache-terror-easy
+File:     &lt;binary&gt;
 Arch:     amd64
 RELRO:      Full RELRO
 Stack:      Canary found
@@ -105,30 +116,42 @@ Stripped:   No</code></pre>
 
         <h3>Reverse Engineering</h3>
         <p>
-          The binary exposes a text-based allocator interface over stdin. The main loop reads
-          a command string and dispatches to one of five handlers: <code>malloc</code>,
-          <code>free</code>, <code>safe_write</code>, <code>safe_read</code>, and <code>quit</code>.
-          Each command takes an index into a global chunk array and, for malloc, a size argument.
+          The binary is a single <code>main</code> — no helper functions, everything inlined.
+          The decompiler reveals two stack-allocated arrays of 16 slots each:
         </p>
+        <pre><code class="language-c">void  *local_198[16];   // chunk pointers
+ulong  local_118[16];   // stored sizes</code></pre>
         <p>
-          <!-- Add disassembly screenshots or Ghidra/IDA decompiler snippets here -->
-          <!-- Key things to show: the chunk array, the overflow in safe_read/safe_write, the absence of a win function -->
+          The <code>malloc</code> handler allocates a chunk and populates both arrays.
+          The stored size is not the requested size — it is <code>size + 0x10</code>:
         </p>
+        <pre><code class="language-c">pvVar4 = malloc((ulong)uVar3);
+local_198[uVar2] = pvVar4;
+local_118[uVar2] = (ulong)(uVar3 + 0x10);   // stored size is always size + 0x10</code></pre>
         <p>
-          The first thing I checked was whether there was a win function or any code path that
-          reads a flag file. There isn't — the binary is a pure allocator harness. The objective
-          is a shell, not a read.
+          <code>safe_read</code> and <code>safe_write</code> both use the stored size, not the
+          allocation size:
         </p>
+        <pre><code class="language-c">// safe_read — reads size+0x10 bytes into a size-byte chunk
+read(0, local_198[uVar2], local_118[uVar2]);
 
-        <h3>Primitives</h3>
+// safe_write — outputs size+0x10 bytes from a size-byte chunk
+fwrite(local_198[uVar2], 1, local_118[uVar2], local_1a8);
+fwrite(&DAT_001020c3, 1, 1, local_1a8);   // single trailing byte (differs between variants)
+fflush(local_1a8);</code></pre>
         <p>
-          The key vulnerability: <code>safe_read</code> and <code>safe_write</code> operate on
-          <code>chunk_size + 0x10</code> bytes — 0x10 bytes more than the allocated region.
-          On a 24-byte chunk (<code>0x18</code>), this reaches <code>0x28</code> bytes into
-          the data, which overflows into the next contiguous chunk's <code>prev_size</code> and
-          <code>chunk_size</code> fields, and — critically — its <code>fd</code> pointer.
-          Controlling the <code>fd</code> pointer of a freed tcache chunk is the tcache poison primitive.
+          This is the complete primitive: every read and write overflows or over-reads the chunk
+          boundary by exactly 0x10 bytes. On a 24-byte chunk, those 0x10 extra bytes reach into
+          the next contiguous chunk's <code>prev_size</code>, <code>chunk_size</code>, and
+          <code>fd</code> pointer. Controlling <code>fd</code> on a freed tcache chunk is tcache poison.
         </p>
+        <p>
+          The last thing to confirm from the decompiler: there is no win function and no code
+          path that reads a flag file. The only exit is <code>quit</code>, which falls through
+          to <code>return 0</code>. The objective is a shell — which means the return address
+          of <code>main</code> is the target.
+        </p>
+        <p class="screenshot-todo">Ghidra decompiler — highlight the <code>size + 0x10</code> line in the malloc handler and the <code>read()</code>/<code>fwrite()</code> calls using the stored size</p>
 
         <h2>Exploit Plan</h2>
         <p>
@@ -251,8 +274,52 @@ ret_address = stack_address - 0x120</code></pre>
         </p>
         <pre><code class="language-python">rbp_address = ret_address - 0x8</code></pre>
 
+        <h3>Verifying the poison in pwndbg</h3>
+        <p>
+          Before running the full exploit, I confirmed the primitive works as expected by
+          pausing in GDB just before and after the tcache overwrite.
+        </p>
+
+        <p><strong>Heap layout before the overflow</strong> — <code>vis</code> shows chunk 0 and chunk 1
+          side by side, both intact, chunk 1's <code>fd</code> pointing normally into the tcache bin:</p>
+        <p class="screenshot-todo">pwndbg <code>vis</code> — chunk 0 and chunk 1 intact, chunk 1 fd pointing normally into the tcache bin (before overflow)</p>
+
+        <p><strong>After writing the payload via <code>safe_read 0</code></strong> — <code>vis</code> again.
+          Chunk 0's data is filled, and chunk 1's <code>fd</code> now holds the mangled pointer to
+          <code>libc.environ</code>. This is the write we should not be able to do based on the
+          allocation size alone:</p>
+        <p class="screenshot-todo">pwndbg <code>vis</code> — chunk 1 fd overwritten with the mangled <code>libc.environ</code> pointer (after overflow)</p>
+
+        <p><strong>Tcache bin before and after</strong> — <code>tcache</code> shows where the next
+          allocation of this size class will land. Before the overflow it points to a valid heap
+          address; after it points into libc:</p>
+        <p class="screenshot-todo">pwndbg <code>tcache</code> — before overflow, fd is a normal heap address</p>
+        <p class="screenshot-todo">pwndbg <code>tcache</code> — after overflow, fd points to <code>libc.environ</code> (demangled)</p>
+
+        <p><strong>Confirming <code>libc.environ</code> holds a stack address</strong> — first,
+          <code>vmmap</code> shows the stack region so we know what a stack address looks like.
+          Then <code>telescope &lt;libc.environ address&gt;</code> reads from that address and
+          shows a pointer into the stack region — the value we're about to leak:</p>
+        <p class="screenshot-todo">pwndbg <code>vmmap</code> — highlight the stack segment so the stack address range is visible</p>
+        <p class="screenshot-todo">pwndbg <code>telescope 0x&lt;libc_base + environ_offset&gt;</code> — shows the stack pointer stored at <code>libc.environ</code></p>
+        <p>
+          The address of <code>libc.environ</code> is simply <code>libc_base + offset</code>,
+          where the offset is resolved after the libc leak:
+        </p>
+        <pre><code class="language-plaintext">pwndbg> p &environ
+$1 = 0x7f3c8a419e40
+pwndbg> p 0x7f3c8a419e40 - 0x7f3c8a200000
+$2 = 0x219e40</code></pre>
+        <p>
+          In the script this is just <code>libc.sym.environ</code> once <code>libc.address</code>
+          is set — pwntools resolves the offset from the symbol table automatically.
+        </p>
+
         <h2>Phase 4 — ELF Base Leak</h2>
         <p>
+          This phase applies the same tcache poison technique as Phase 3 — <code>vis</code> and
+          <code>tcache</code> in pwndbg confirm the same overwrite pattern, now targeting
+          <code>rbp_address</code> on the stack instead of <code>libc.environ</code>.
           Before writing the final payload, I poisoned the tcache a second time to allocate at
           <code>rbp_address</code> and read the stack frame contents. At <code>rbp + 0x18</code>
           sits the saved return address back into <code>main</code> — a binary address that,
@@ -506,6 +573,7 @@ io.recvuntil(b"\x20\x0a")</code></pre>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <script>hljs.highlightAll();</script>
+  <script src="../assets/js/toc.js"></script>
   <script src="../assets/js/theme.js"></script>
   <script src="../assets/js/main.js"></script>
 </body>
