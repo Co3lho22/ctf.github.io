@@ -398,6 +398,17 @@ io.sendline(b"safe_write 10")
 
 leak = io.recv(8)
 libc.address = u64(leak) - 0x219ce0    # known offset from arena pointer to libc base</code></pre>
+
+        <p>
+          The <code>0x219ce0</code> offset isn't assumed — it's read directly from pwndbg.
+          Pause the binary after the leak and run <code>xinfo</code> on the raw leaked value.
+          Pwndbg will show which memory mapping the address falls in and its exact offset from
+          the start of that mapping. If the fd leaked from the unsorted bin lands inside the
+          libc mapping, that offset is the distance from libc base to <code>main_arena</code>'s
+          internal fd — which is precisely what we subtract.
+        </p>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/xinfo-libc-leak.png — pwndbg xinfo on the raw leaked value: shows the containing map (libc.so.6), start address, and offset confirming it lives inside libc and giving the 0x219ce0 delta</p>
+
         <pre><code class="language-plaintext">[+] libc address: 0x7f3c8a200000
 [+] libc.environ: 0x7f3c8a419e40</code></pre>
         <p>
@@ -443,12 +454,26 @@ ret_address = stack_address - 0x120</code></pre>
         <pre><code class="language-plaintext">[+] stack_address (environ): 0x7ffe928bf5a8
 [+] ret_address: 0x7ffe928bf488</code></pre>
         <p>
-          The offset <code>-0x120</code> was determined by comparing <code>libc.environ</code>
-          against the return address shown in GDB's backtrace.
-          Writing directly to <code>ret_address</code> turned out to be misaligned — the chunk
+          The <code>-0x120</code> offset is not guessed — it is read directly from the running
+          process. The method: pause the binary in pwndbg right after the libc leak, then use
+          <code>backtrace</code> to see the live call stack and identify the address where
+          <code>main</code>'s return address is stored. Then use <code>telescope</code> or raw
+          stack inspection around the value read from <code>libc.environ</code> to compute the
+          distance between the two.
+        </p>
+        <p><strong>Step 1 — backtrace</strong> reveals the exact stack address holding
+          <code>main</code>'s return address:</p>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/backtrace-main-frame.png — pwndbg backtrace showing the call stack; highlight the main frame's return address and its stack location</p>
+        <p><strong>Step 2 — raw stack inspection</strong> around the <code>libc.environ</code>
+          value. <code>telescope</code> at the leaked stack address shows the surrounding
+          qwords — scrolling down makes the return address visible and the offset calculable:</p>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/telescope-stack-offset.png — pwndbg telescope at the stack address from libc.environ, showing the surrounding qwords and identifying the return address offset (-0x120)</p>
+        <p>
+          With <code>stack_address - ret_address_location = 0x120</code> confirmed,
+          writing directly to <code>ret_address</code> turned out to be misaligned — the chunk
           data would start mid-payload. Targeting <code>rbp</code> instead (8 bytes before
-          <code>ret</code>) aligns the write perfectly: <code>p64(0x0)</code> lands on the saved
-          rbp, and the payload chain starts exactly at the return address.
+          <code>ret</code>) aligns the write perfectly: <code>p64(0x0)</code> lands on saved
+          rbp, and the chain starts exactly at the return address.
         </p>
         <pre><code class="language-python">rbp_address = ret_address - 0x8</code></pre>
 
@@ -529,6 +554,15 @@ io.recv(8 * 3)    # skip: saved rbp, saved rsp, __libc_start_call_main return st
 leak = io.recv(8)
 main_address = u64(leak)
 elf.address = main_address - 0x1957</code></pre>
+        <p>
+          <code>telescope rbp_address</code> in pwndbg makes this obvious — it prints each
+          qword in the frame with resolved symbols next to it. The first entries show stack
+          and libc addresses; the one that resolves into the binary (shown as
+          <code>&lt;binary+offset&gt;</code>) is the return address into <code>main</code>.
+          Reading that offset directly gives the <code>0x1957</code> delta to subtract from
+          the leaked value to get the ELF base.
+        </p>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/telescope-rbp-frame.png — pwndbg telescope at rbp_address showing the stack frame qwords with resolved symbols; the binary return address entry is clearly distinguishable from the libc and stack entries</p>
         <pre><code class="language-plaintext">[+] main_address: 0x55f8a1601957
 [+] elf.address: 0x55f8a1600000
 [+] libc system: 0x7f3c8a248d60</code></pre>
@@ -569,6 +603,17 @@ io.send(p64(0x0) + rop.chain())
 
 # trigger: main() returns, walks the chain
 io.sendline(b"quit")</code></pre>
+        <p><strong>Before triggering</strong> — <code>telescope rbp_address</code> shows the
+          payload written to the stack. The first qword is the null saved rbp, followed by the
+          gadgets in order: <code>pop rdi</code> → 0 → <code>pop rsi</code> → 0 →
+          <code>setreuid</code> → <code>pop rdi</code> → <code>/bin/sh</code> → <code>system</code>:</p>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/telescope-rop-chain.png — pwndbg telescope at rbp_address showing the written gadgets in order on the stack</p>
+
+        <p><strong>After <code>quit</code> triggers the return</strong> — <code>backtrace</code>
+          shows the execution walking the chain, confirming each gadget fires in the right order
+          before landing in <code>system</code>:</p>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/backtrace-chain.png — pwndbg backtrace mid-chain execution showing the gadget sequence executing</p>
+
         <pre><code class="language-plaintext">[*] Switching to interactive mode
 $ id
 uid=0(root) gid=0(root) groups=0(root)</code></pre>
