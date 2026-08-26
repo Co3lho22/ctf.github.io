@@ -91,7 +91,10 @@ patchelf --set-rpath . &lt;binary&gt;</code></pre>
         <p>
           After patching, the binary runs locally against the exact libc from the server.
           Any offset derived in GDB is valid on the remote — no surprises at submission time.
+          Confirm the version before doing anything else:
         </p>
+        <pre><code class="language-bash">strings libc.so.6 | grep "GNU"</code></pre>
+        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/libc-version.png — terminal output of strings libc.so.6 | grep "GNU" showing glibc 2.35</p>
 
         <h2>Recon</h2>
 
