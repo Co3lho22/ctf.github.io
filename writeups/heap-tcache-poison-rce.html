@@ -141,17 +141,114 @@ Stripped:   No</code></pre>
           There are no helper functions; everything lives inside a single <code>main</code>.
         </p>
         <p>
-          Two arrays are allocated on the stack at startup and zero-initialised:
+          The full decompiled <code>main</code> — renamed variables and Ghidra comments intact:
         </p>
-        <pre><code class="language-c">void  *chunks[16];       // pointers to allocated heap regions
-ulong  chunk_sizes[16];  // stored sizes — not what you'd expect</code></pre>
+        <pre><code class="language-c">undefined8 main(undefined8 param_1, undefined8 *param_2)
+{
+  int iVar1;
+  uint uVar2;         // index
+  uint uVar3;         // size
+  void *pvVar4;       // chunk pointer
+  long lVar5;
+  undefined8 *puVar6;
+  ulong *puVar7;
+  long in_FS_OFFSET;
+  byte bVar8;
+  FILE *write_fp;
+  undefined8 chunks[16];       // pointers to allocated heap regions
+  ulong chunk_sizes[16];       // stored sizes — not what you'd expect
+  char cmd_buf[136];
+  long canary;
+
+  bVar8 = 0;
+  canary = *(long *)(in_FS_OFFSET + 0x28);
+  setvbuf(stdin, (char *)0x0, 2, 0);
+  setvbuf(stdout, (char *)0x0, 2, 0);
+  puts("###");
+  printf("### Welcome to %s!\n", *param_2);
+  puts("###");
+  putchar(10);
+  // zero-initialise both arrays
+  puVar6 = chunks;
+  for (lVar5 = 0x10; lVar5 != 0; lVar5 = lVar5 + -1) {
+    *puVar6 = 0;
+    puVar6 = puVar6 + (ulong)bVar8 * -2 + 1;
+  }
+  write_fp = (FILE *)0x0;
+  puVar7 = chunk_sizes;
+  for (lVar5 = 0x10; lVar5 != 0; lVar5 = lVar5 + -1) {
+    *puVar7 = 0;
+    puVar7 = puVar7 + (ulong)bVar8 * -2 + 1;
+  }
+  while (true) {
+    while (true) {
+      while (true) {
+        while (true) {
+          puts("");
+          printf("[*] Function (malloc/free/safe_write/safe_read/quit): ");
+          __isoc99_scanf("%127s", cmd_buf);
+          puts("");
+          iVar1 = strcmp(cmd_buf, "malloc");
+          if (iVar1 != 0) break;
+          printf("Index: "); __isoc99_scanf("%127s", cmd_buf); puts("");
+          uVar2 = atoi(cmd_buf);
+          if (0xf &lt; uVar2)
+            __assert_fail("allocation_index &lt; 16", "/mnt/pwnshop/source.c", 0x40, "main");
+          printf("Size: "); __isoc99_scanf("%127s", cmd_buf); puts("");
+          uVar3 = atoi(cmd_buf);
+          pvVar4 = malloc((ulong)uVar3);
+          chunks[uVar2] = pvVar4;
+          /* OVERFLOW PRIMITIVE: stored size is malloc_size + 0x10, not malloc_size */
+          /* chunk_sizes[idx] = malloc_size + 0x10 — this is what safe_read/safe_write will use */
+          chunk_sizes[uVar2] = (ulong)(uVar3 + 0x10);
+        }
+        iVar1 = strcmp(cmd_buf, "free");
+        if (iVar1 != 0) break;
+        printf("Index: "); __isoc99_scanf("%127s", cmd_buf); puts("");
+        uVar2 = atoi(cmd_buf);
+        if (0xf &lt; uVar2)
+          __assert_fail("allocation_index &lt; 16", "/mnt/pwnshop/source.c", 0x53, "main");
+        free((void *)chunks[uVar2]);
+        chunks[uVar2] = 0;
+      }
+      iVar1 = strcmp(cmd_buf, "safe_read");
+      if (iVar1 != 0) break;
+      printf("Index: "); __isoc99_scanf("%127s", cmd_buf); puts("");
+      uVar2 = atoi(cmd_buf);
+      if (0xf &lt; uVar2)
+        __assert_fail("allocation_index &lt; 16", "/mnt/pwnshop/source.c", 0x60, "main");
+      /* safe_read: reads chunk_sizes[idx] bytes into chunk — 0x10 bytes past the allocation boundary (overflow) */
+      read(0, (void *)chunks[uVar2], chunk_sizes[uVar2]);
+      puts("");
+    }
+    iVar1 = strcmp(cmd_buf, "safe_write");
+    if (iVar1 != 0) break;
+    if (write_fp == (FILE *)0x0)
+      write_fp = fdopen(1, "w");
+    printf("Index: "); __isoc99_scanf("%127s", cmd_buf); puts("");
+    uVar2 = atoi(cmd_buf);
+    if (0xf &lt; uVar2)
+      __assert_fail("allocation_index &lt; 16", "/mnt/pwnshop/source.c", 0x72, "main");
+    /* safe_write: leaks chunk_sizes[idx] bytes from chunk — 0x10 bytes past the allocation boundary (over-read) */
+    fwrite((void *)chunks[uVar2], 1, chunk_sizes[uVar2], write_fp);
+    /* trailing byte: \x20\n in hard variant */
+    fwrite(&amp;DAT_001020c3, 1, 1, write_fp);
+    fflush(write_fp);
+  }
+  iVar1 = strcmp(cmd_buf, "quit");
+  if (iVar1 != 0)
+    puts("Unrecognized choice!");
+  puts("### Goodbye!");
+  if (canary == *(long *)(in_FS_OFFSET + 0x28))
+    return 0;
+  __stack_chk_fail();
+}</code></pre>
         <p>
-          Every operation takes an index into these arrays. The index is bounds-checked against
-          15 with <code>__assert_fail</code>, so the slot space is fixed at 16 entries.
-          There is no win function and no code path that reads a flag — the only exit is
-          <code>quit</code>, which returns from <code>main</code>. The objective is a shell.
+          Two stack-allocated arrays of 16 slots each hold all state.
+          Every operation is bounds-checked against index 15 via <code>__assert_fail</code>.
+          There is no win function, no flag read — the only exit is <code>quit</code> returning
+          from <code>main</code>. The objective is a shell.
         </p>
-        <img src="../assets/img/writeups/heap-tcache-poison-rce/main_overview.png" alt="Ghidra decompiler — main() overview showing chunks and chunk_sizes arrays" style="width:100%;border-radius:6px;border:1px solid var(--border);margin:0.75rem 0;">
 
         <h3>Command Handlers</h3>
         <p>
@@ -162,25 +259,39 @@ ulong  chunk_sizes[16];  // stored sizes — not what you'd expect</code></pre>
         <p><strong>malloc &lt;idx&gt; &lt;size&gt;</strong> — calls <code>malloc(size)</code>,
           stores the pointer in <code>chunks[idx]</code>, and stores the size in
           <code>chunk_sizes[idx]</code>. Straightforward.</p>
-        <img src="../assets/img/writeups/heap-tcache-poison-rce/malloc.png" alt="Ghidra decompiler — malloc handler" style="width:100%;border-radius:6px;border:1px solid var(--border);margin:0.75rem 0;">
+        <pre><code class="language-c">pvVar4 = malloc((ulong)uVar3);
+chunks[uVar2] = pvVar4;
+/* OVERFLOW PRIMITIVE: stored size is malloc_size + 0x10, not malloc_size */
+/* chunk_sizes[idx] = malloc_size + 0x10 — this is what safe_read/safe_write will use */
+chunk_sizes[uVar2] = (ulong)(uVar3 + 0x10);</code></pre>
 
         <p><strong>free &lt;idx&gt;</strong> — calls <code>free(chunks[idx])</code> and
           zeroes the pointer slot. No UAF here — the pointer is cleared after free.</p>
-        <img src="../assets/img/writeups/heap-tcache-poison-rce/free.png" alt="Ghidra decompiler — free handler" style="width:100%;border-radius:6px;border:1px solid var(--border);margin:0.75rem 0;">
+        <pre><code class="language-c">free((void *)chunks[uVar2]);
+chunks[uVar2] = 0;    // pointer cleared — no UAF</code></pre>
 
         <p><strong>safe_read &lt;idx&gt;</strong> — reads from stdin directly into
           <code>chunks[idx]</code> using <code>read(0, chunks[idx], chunk_sizes[idx])</code>.
           The size used is whatever is stored in <code>chunk_sizes[idx]</code>.</p>
-        <img src="../assets/img/writeups/heap-tcache-poison-rce/safe_read.png" alt="Ghidra decompiler — safe_read handler" style="width:100%;border-radius:6px;border:1px solid var(--border);margin:0.75rem 0;">
+        <pre><code class="language-c">/* safe_read: reads chunk_sizes[idx] bytes into chunk — 0x10 bytes past the allocation boundary (overflow) */
+read(0, (void *)chunks[uVar2], chunk_sizes[uVar2]);</code></pre>
 
         <p><strong>safe_write &lt;idx&gt;</strong> — writes <code>chunk_sizes[idx]</code> bytes
           from <code>chunks[idx]</code> to stdout via <code>fwrite</code>, then writes one
           trailing byte (<code>\x20\n</code>), then flushes.</p>
-        <img src="../assets/img/writeups/heap-tcache-poison-rce/safe_write.png" alt="Ghidra decompiler — safe_write handler" style="width:100%;border-radius:6px;border:1px solid var(--border);margin:0.75rem 0;">
+        <pre><code class="language-c">/* safe_write: leaks chunk_sizes[idx] bytes from chunk — 0x10 bytes past the allocation boundary (over-read) */
+fwrite((void *)chunks[uVar2], 1, chunk_sizes[uVar2], write_fp);
+/* trailing byte: \x20\n in hard variant */
+fwrite(&amp;DAT_001020c3, 1, 1, write_fp);
+fflush(write_fp);</code></pre>
 
         <p><strong>quit</strong> — exits the loop and returns from <code>main</code>.
           This is the trigger for any payload written to the return address.</p>
-        <img src="../assets/img/writeups/heap-tcache-poison-rce/quit_goodby.png" alt="Ghidra decompiler — quit handler" style="width:100%;border-radius:6px;border:1px solid var(--border);margin:0.75rem 0;">
+        <pre><code class="language-c">iVar1 = strcmp(cmd_buf, "quit");
+if (iVar1 != 0)
+    puts("Unrecognized choice!");
+puts("### Goodbye!");
+return 0;    // main returns — any payload on the stack executes here</code></pre>
 
         <h3>Spotting the Primitive</h3>
         <p>
@@ -201,7 +312,16 @@ ulong  chunk_sizes[16];  // stored sizes — not what you'd expect</code></pre>
           <code>fd</code> pointer. Controlling <code>fd</code> on a freed tcache chunk is the
           tcache poison primitive.
         </p>
-        <img src="../assets/img/writeups/heap-tcache-poison-rce/oneliner_of_0x10.png" alt="Ghidra decompiler — malloc handler showing chunk_sizes[idx] = size + 0x10" style="width:100%;border-radius:6px;border:1px solid var(--border);margin:0.75rem 0;">
+        <pre><code class="language-c">pvVar4 = malloc((ulong)uVar3);
+chunks[uVar2] = pvVar4;
+/* OVERFLOW PRIMITIVE: stored size is malloc_size + 0x10, not malloc_size */
+chunk_sizes[uVar2] = (ulong)(uVar3 + 0x10);  // &lt;-- the bug
+
+// ...later, in safe_read:
+read(0, (void *)chunks[uVar2], chunk_sizes[uVar2]);  // reads size+0x10 bytes
+
+// ...later, in safe_write:
+fwrite((void *)chunks[uVar2], 1, chunk_sizes[uVar2], write_fp);  // leaks size+0x10 bytes</code></pre>
 
         <h3>Confirming with pwndbg</h3>
         <p>
