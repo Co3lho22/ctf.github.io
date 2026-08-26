@@ -162,24 +162,25 @@ ulong  chunk_sizes[16];  // stored sizes — not what you'd expect</code></pre>
         <p><strong>malloc &lt;idx&gt; &lt;size&gt;</strong> — calls <code>malloc(size)</code>,
           stores the pointer in <code>chunks[idx]</code>, and stores the size in
           <code>chunk_sizes[idx]</code>. Straightforward.</p>
-        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/ghidra-malloc.png — Ghidra decompiler showing the malloc handler: malloc() call, chunks[idx] assignment, chunk_sizes[idx] assignment</p>
+        <img src="../assets/img/writeups/heap-tcache-poison-rce/malloc.png" alt="Ghidra decompiler — malloc handler" style="width:100%;border-radius:6px;border:1px solid var(--border);margin:0.75rem 0;">
 
         <p><strong>free &lt;idx&gt;</strong> — calls <code>free(chunks[idx])</code> and
           zeroes the pointer slot. No UAF here — the pointer is cleared after free.</p>
-        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/ghidra-free.png — Ghidra decompiler showing the free handler</p>
+        <img src="../assets/img/writeups/heap-tcache-poison-rce/free.png" alt="Ghidra decompiler — free handler" style="width:100%;border-radius:6px;border:1px solid var(--border);margin:0.75rem 0;">
 
         <p><strong>safe_read &lt;idx&gt;</strong> — reads from stdin directly into
           <code>chunks[idx]</code> using <code>read(0, chunks[idx], chunk_sizes[idx])</code>.
           The size used is whatever is stored in <code>chunk_sizes[idx]</code>.</p>
-        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/ghidra-safe-read.png — Ghidra decompiler showing the safe_read handler with the read() call and chunk_sizes[idx] as the length</p>
+        <img src="../assets/img/writeups/heap-tcache-poison-rce/safe_read.png" alt="Ghidra decompiler — safe_read handler" style="width:100%;border-radius:6px;border:1px solid var(--border);margin:0.75rem 0;">
 
         <p><strong>safe_write &lt;idx&gt;</strong> — writes <code>chunk_sizes[idx]</code> bytes
           from <code>chunks[idx]</code> to stdout via <code>fwrite</code>, then writes one
           trailing byte (<code>\x20\n</code>), then flushes.</p>
-        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/ghidra-safe-write.png — Ghidra decompiler showing the safe_write handler: both fwrite() calls and the trailing byte comment</p>
+        <img src="../assets/img/writeups/heap-tcache-poison-rce/safe_write.png" alt="Ghidra decompiler — safe_write handler" style="width:100%;border-radius:6px;border:1px solid var(--border);margin:0.75rem 0;">
 
         <p><strong>quit</strong> — exits the loop and returns from <code>main</code>.
           This is the trigger for any payload written to the return address.</p>
+        <img src="../assets/img/writeups/heap-tcache-poison-rce/quit_goodby.png" alt="Ghidra decompiler — quit handler" style="width:100%;border-radius:6px;border:1px solid var(--border);margin:0.75rem 0;">
 
         <h3>Spotting the Primitive</h3>
         <p>
