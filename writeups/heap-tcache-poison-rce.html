@@ -108,22 +108,13 @@ Compiled by GNU CC version 11.4.0.</code></pre>
         <h2>Recon</h2>
 
         <h3>Checksec</h3>
-        <pre><code class="language-plaintext">pwndbg> checksec
-File:     &lt;binary&gt;
-Arch:     amd64
-RELRO:      Full RELRO
-Stack:      Canary found
-NX:         NX enabled
-PIE:        PIE enabled
-SHSTK:      Enabled
-IBT:        Enabled
-Stripped:   No</code></pre>
+        <img src="../assets/img/writeups/heap-tcache-poison-rce/checksec.png" alt="pwndbg checksec output — all protections enabled">
         <p>
-          Full RELRO rules out a GOT overwrite. Stack canary rules out a direct stack smash.
-          NX rules out shellcode. PIE randomizes all binary addresses at load time. SHSTK and IBT
-          are Intel CET shadow-stack mitigations — relevant to note, but they don't interfere with
-          a heap-based attack that targets the stack. Not stripped means symbols are intact,
-          which helps when computing libc offsets.
+          Everything is green — all protections are active. Full RELRO rules out a GOT overwrite.
+          Stack canary rules out a direct stack smash. NX rules out shellcode. PIE randomizes all
+          binary addresses at load time. SHSTK and IBT are Intel CET shadow-stack mitigations —
+          relevant to note, but they don't interfere with a heap-based attack that targets the
+          stack. Not stripped means symbols are intact, which helps when computing libc offsets.
         </p>
 
         <h2>Reverse Engineering</h2>
@@ -407,7 +398,13 @@ libc.address = u64(leak) - 0x219ce0    # known offset from arena pointer to libc
           libc mapping, that offset is the distance from libc base to <code>main_arena</code>'s
           internal fd — which is precisely what we subtract.
         </p>
-        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/xinfo-libc-leak.png — pwndbg xinfo on the raw leaked value: shows the containing map (libc.so.6), start address, and offset confirming it lives inside libc and giving the 0x219ce0 delta</p>
+        <img src="../assets/img/writeups/heap-tcache-poison-rce/libc_offset_from_xinfo.png" alt="Split view: exploit output on the left showing the raw leaked bytes and computed libc base; pwndbg xinfo on the right confirming the leaked address belongs to libc.so.6 at offset 0x219ce0">
+        <p>
+          The left pane shows the exploit receiving the raw leak and computing <code>libc.address</code>.
+          The right pane confirms it with <code>xinfo</code>: pwndbg resolves the address to the
+          <code>libc.so.6</code> mapping and shows <em>File (Base) offset = 0x219ce0</em> — exactly
+          the value subtracted to get libc base.
+        </p>
 
         <pre><code class="language-plaintext">[+] libc address: 0x7f3c8a200000
 [+] libc.environ: 0x7f3c8a419e40</code></pre>
