@@ -406,11 +406,16 @@ libc.address = u64(leak) - 0x219ce0    # known offset from arena pointer to libc
           the value subtracted to get libc base.
         </p>
 
-        <pre><code class="language-plaintext">[+] libc address: 0x7f3c8a200000
-[+] libc.environ: 0x7f3c8a419e40</code></pre>
         <p>
-          With libc resolved, <code>libc.environ</code> — the address of the environment
-          pointer on the stack — is now a concrete target for the next poison.
+          With the base known, pwntools resolves <code>libc.environ</code> for free — because the
+          libc we copied is not stripped, its symbol table is intact and pwntools reads the offset
+          directly from it:
+        </p>
+        <pre><code class="language-python">environ_addr = libc.sym['environ']  # pwntools reads the offset from libc's symbol table</code></pre>
+        <p>
+          No hardcoded offsets needed — pwntools adds the symbol's offset to <code>libc.address</code>
+          and gives back the concrete runtime address of <code>environ</code>, which is the next
+          poison target.
         </p>
 
         <h2>Phase 3 — Stack Leak via Tcache Poison</h2>
