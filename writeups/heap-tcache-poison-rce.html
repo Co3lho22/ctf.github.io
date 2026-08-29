@@ -363,7 +363,6 @@ io.sendline(b"safe_write 2")
 
 leak = io.recv(8)
 heap_base = u64(leak) &lt;&lt; 12    # undo the right-shift</code></pre>
-        <pre><code class="language-plaintext">[+] heap_base: 0x55f8a2400000</code></pre>
         <p>
           With the heap base known, we can compute the safe-linking key used in future
           tcache poison steps: <code>key = heap_base &gt;&gt; 12</code>.
@@ -453,8 +452,6 @@ io.sendline(b"safe_write 2")
 
 stack_address = u64(io.recv(8))
 ret_address = stack_address - 0x120</code></pre>
-        <pre><code class="language-plaintext">[+] stack_address (environ): 0x7ffe928bf5a8
-[+] ret_address: 0x7ffe928bf488</code></pre>
         <p>
           The <code>-0x120</code> offset is not guessed — it is read directly from the running
           process. The method: pause the binary in pwndbg right after the libc leak, then use
@@ -465,11 +462,11 @@ ret_address = stack_address - 0x120</code></pre>
         </p>
         <p><strong>Step 1 — backtrace</strong> reveals the exact stack address holding
           <code>main</code>'s return address:</p>
-        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/backtrace-main-frame.png — pwndbg backtrace showing the call stack; highlight the main frame's return address and its stack location</p>
+        <img src="../assets/img/writeups/heap-tcache-poison-rce/backtrace.png" alt="pwndbg backtrace showing the live call stack and the stack address holding main's return address">
         <p><strong>Step 2 — raw stack inspection</strong> around the <code>libc.environ</code>
           value. <code>telescope</code> at the leaked stack address shows the surrounding
           qwords — scrolling down makes the return address visible and the offset calculable:</p>
-        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/telescope-stack-offset.png — pwndbg telescope at the stack address from libc.environ, showing the surrounding qwords and identifying the return address offset (-0x120)</p>
+        <img src="../assets/img/writeups/heap-tcache-poison-rce/environ_stack_address_0x120_gets_return_address_telescope.png" alt="pwndbg telescope at the stack address from libc.environ showing surrounding qwords; the return address is 0x120 bytes below">
         <p>
           With <code>stack_address - ret_address_location = 0x120</code> confirmed,
           writing directly to <code>ret_address</code> turned out to be misaligned — the chunk
@@ -501,24 +498,12 @@ ret_address = stack_address - 0x120</code></pre>
         <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/tcache-before-overflow.png — pwndbg tcache, fd is a normal heap address</p>
         <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/tcache-after-overflow.png — pwndbg tcache, fd now points to libc.environ (demangled)</p>
 
-        <p><strong>Confirming <code>libc.environ</code> holds a stack address</strong> — first,
-          <code>vmmap</code> shows the stack region so we know what a stack address looks like.
-          Then <code>telescope &lt;libc.environ address&gt;</code> reads from that address and
-          shows a pointer into the stack region — the value we're about to leak:</p>
+        <p><strong>Confirming <code>libc.environ</code> holds a stack address</strong> — the exploit
+          logs the address computed via <code>libc.sym['environ']</code>; <code>p &amp;environ</code>
+          in pwndbg returns the same value, and <code>telescope</code> at that address shows the
+          stack pointer stored inside it — the value we are about to leak:</p>
         <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/vmmap-stack.png — pwndbg vmmap with the stack segment highlighted</p>
-        <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/telescope-environ.png — pwndbg telescope at libc.environ address showing the stack pointer value</p>
-        <p>
-          The address of <code>libc.environ</code> is simply <code>libc_base + offset</code>,
-          where the offset is resolved after the libc leak:
-        </p>
-        <pre><code class="language-plaintext">pwndbg> p &environ
-$1 = 0x7f3c8a419e40
-pwndbg> p 0x7f3c8a419e40 - 0x7f3c8a200000
-$2 = 0x219e40</code></pre>
-        <p>
-          In the script this is just <code>libc.sym.environ</code> once <code>libc.address</code>
-          is set — pwntools resolves the offset from the symbol table automatically.
-        </p>
+        <img src="../assets/img/writeups/heap-tcache-poison-rce/stdout_leakd_environ_address_teelescope_penviron_confirms_address_and_and_stack_value.png" alt="Split view: exploit stdout logging the computed environ address on the left; pwndbg telescope and p &environ on the right confirming the same address and the stack value it points to">
 
         <h2>Phase 4 — ELF Base Leak</h2>
         <p>
@@ -565,9 +550,6 @@ elf.address = main_address - 0x1957</code></pre>
           the leaked value to get the ELF base.
         </p>
         <p class="screenshot-todo">assets/img/writeups/heap-tcache-poison-rce/telescope-rbp-frame.png — pwndbg telescope at rbp_address showing the stack frame qwords with resolved symbols; the binary return address entry is clearly distinguishable from the libc and stack entries</p>
-        <pre><code class="language-plaintext">[+] main_address: 0x55f8a1601957
-[+] elf.address: 0x55f8a1600000
-[+] libc system: 0x7f3c8a248d60</code></pre>
         <p>
           Worth noting: all gadgets for the final payload come from libc, not the binary,
           so the ELF base itself isn't strictly needed to execute the shell. It's useful
